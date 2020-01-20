@@ -24,13 +24,8 @@ import (
 // netCmd represents the net command
 var netCmd = &cobra.Command{
 	Use:   "net",
-	Short: "A brief description of your command",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
-
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
+	Short: "network commond",
+	Long:  `network commond like:host port`,
 	// Run: func(cmd *cobra.Command, args []string) {
 	// 	fmt.Println("net called")
 	// },
@@ -49,5 +44,5 @@ func init() {
 	// is called directly, e.g.:
 	// netCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 	netCmd.PersistentFlags().StringP("host", "H", "127.0.0.1", "target ip or domain")
-	netCmd.PersistentFlags().Int16P("port", "p", 2333, "target host's service port")
+	netCmd.PersistentFlags().IntP("port", "p", 2333, "target host's service port")
 }

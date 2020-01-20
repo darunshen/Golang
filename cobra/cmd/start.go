@@ -18,6 +18,7 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/darunshen/go/chat"
 	"github.com/spf13/cobra"
 )
 
@@ -27,7 +28,16 @@ var startCmd = &cobra.Command{
 	Short: "start the server",
 	Long:  `start the server.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("start called")
+		host, err := netCmd.Flags().GetString("host")
+		if err != nil {
+			fmt.Printf("get host error : %v\n", err)
+		}
+		port, err := netCmd.Flags().GetInt("port")
+		if err != nil {
+			fmt.Printf("get port error : %v\n", port)
+		}
+		fmt.Printf("start called to %v:%v\n", host, port)
+		chat.Start(host, port)
 	},
 }
 
