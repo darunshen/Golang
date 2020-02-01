@@ -9,14 +9,17 @@ type NetPackage interface {
 }
 
 // NetSession support connection info with server and client
-type NetSession interface{}
+type NetSession interface {
+	ReadPackage() (interface{}, error)
+	WritePackage(pack interface{}) error
+	ProcessPackage(pack interface{}) error
+	CloseSession() error
+}
 
 // NetServer support protocol server operation
 type NetServer interface {
 	Start(address string) error
 	StartSession(conn *net.TCPConn) error
-	ReadPackage() error
-	WritePackage(pack *NetPackage) error
 	// test func()
 }
 
