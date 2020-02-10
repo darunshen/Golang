@@ -5,6 +5,7 @@ go 1.13
 require (
 	github.com/mitchellh/go-homedir v1.1.0
 	github.com/pelletier/go-toml v1.6.0 // indirect
+	github.com/saibing/bingo v0.0.0-20190331051950-76bcd777316d // indirect
 	github.com/spf13/afero v1.2.2 // indirect
 	github.com/spf13/cast v1.3.1 // indirect
 	github.com/spf13/cobra v0.0.5
@@ -15,4 +16,5 @@ require (
 	golang.org/x/text v0.3.2 // indirect
 	gopkg.in/ini.v1 v1.51.1 // indirect
 	gopkg.in/yaml.v2 v2.2.7 // indirect
+	gortc.io/sdp v0.17.0
 )

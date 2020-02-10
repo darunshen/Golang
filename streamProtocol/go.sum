@@ -1,0 +1,6 @@
+github.com/pkg/errors v0.8.0 h1:WdK/asTD0HN+q6hsWO3/vpuAkAr+tw6aNJNDFFf0+qw=
+github.com/pkg/errors v0.8.0/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
+github.com/teris-io/shortid v0.0.0-20171029131806-771a37caa5cf h1:Z2X3Os7oRzpdJ75iPqWZc0HeJWFYNCvKsfpQwFpRNTA=
+github.com/teris-io/shortid v0.0.0-20171029131806-771a37caa5cf/go.mod h1:M8agBzgqHIhgj7wEn9/0hJUZcrvt9VY+Ln+S1I5Mha0=
+gortc.io/sdp v0.17.0 h1:gPmGXqyszHplnlMeF2X0eCOK+G8aAK4PP6puglIcofc=
+gortc.io/sdp v0.17.0/go.mod h1:iwG4LtzGX1MLglrl5x7AL7cfLndFPMfJ02koQl5KIgE=

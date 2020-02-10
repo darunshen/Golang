@@ -23,7 +23,10 @@ type BasicNet struct {
 // for session within server and client
 type BasicNetSession struct {
 	NetSession
-	Conn  *net.TCPConn
-	Bufio *bufio.ReadWriter
-	extra *interface{}
+	Conn            *net.TCPConn
+	Bufio           *bufio.ReadWriter
+	extra           *interface{}
+	ID              string
+	ReadBufferSize  int // udp/tcp read buffer size
+	WriteBufferSize int // udp/tcp write buffer size
 }
