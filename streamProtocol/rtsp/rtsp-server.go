@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/darunshen/go/streamProtocol/protocolinterface"
 	"github.com/teris-io/shortid"
@@ -12,6 +13,8 @@ import (
 // Server rtsp server
 type Server struct {
 	protocolinterface.BasicNet
+	ResourceMap      map[string]*ResourceSession
+	ResourceMapMutex sync.Mutex
 }
 
 // StartSession start a session with rtsp client
@@ -23,6 +26,8 @@ func (server *Server) StartSession(conn *net.TCPConn) error {
 
 	newSession := new(NetSession)
 	newSession.Conn = conn
+	newSession.ResourceMap = server.ResourceMap
+	newSession.ResourceMapMutex = &server.ResourceMapMutex
 	newSession.Bufio =
 		bufio.NewReadWriter(
 			bufio.NewReaderSize(conn, server.ReadBufferSize),
@@ -30,22 +35,18 @@ func (server *Server) StartSession(conn *net.TCPConn) error {
 	newSession.ID = shortid.MustGenerate()
 	newSession.ReadBufferSize = server.ReadBufferSize
 	newSession.WriteBufferSize = server.WriteBufferSize
-	server.SessionMapMutex.Lock()
-	server.SessionMap[conn.
-		LocalAddr().String()+conn.RemoteAddr().String()] = &(newSession.BasicNetSession)
-	server.SessionMapMutex.Unlock()
 	for {
 		if pkg, err := newSession.ReadPackage(); err == nil {
 			if err = newSession.ProcessPackage(pkg); err != nil {
-				fmt.Printf("ProcessPackage error:%v", err)
+				fmt.Printf("ProcessPackage error:%v\n", err)
 				break
 			}
 			if err = newSession.WritePackage(pkg); err != nil {
-				fmt.Printf("WritePackage error:%v", err)
+				fmt.Printf("WritePackage error:%v\n", err)
 				break
 			}
 		} else {
-			fmt.Printf("ReadPackage error:%v", err)
+			fmt.Printf("ReadPackage error:%v\n", err)
 			break
 		}
 	}
@@ -64,7 +65,7 @@ func (server *Server) Start(address string,
 	bufferWriteSize int) error {
 	server.ReadBufferSize = bufferReadSize
 	server.WriteBufferSize = bufferWriteSize
-	server.SessionMap = make(map[string]*protocolinterface.BasicNetSession)
+	server.ResourceMap = make(map[string]*ResourceSession)
 	addr, err := net.ResolveTCPAddr("tcp", address)
 	if err != nil {
 		return fmt.Errorf("address resolving failed : %v", err)

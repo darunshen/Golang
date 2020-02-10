@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/darunshen/go/streamProtocol/protocolinterface"
 	"gortc.io/sdp"
@@ -27,6 +29,12 @@ const (
 	UnsupportedMediaType CommandError = "415 Unsupported Media Type"
 	//UnsupportedTransport Unsupported Transport
 	UnsupportedTransport CommandError = "461 Unsupported transport"
+	//BadRequest bad request like url invalid
+	BadRequest CommandError = "400 Bad Request"
+	//Forbidden forbidden request like pusher's request's resource path already used
+	Forbidden CommandError = "403 Forbidden"
+	//NotFound not found the resource path for puller client
+	NotFound CommandError = "404 Not Found"
 )
 
 //ClientType rtsp client type
@@ -55,9 +63,10 @@ const (
 
 // ResponseInfo response info
 type ResponseInfo struct {
-	Error          CommandError
-	OptionsMethods string
-	SetupTransport string
+	Error           CommandError
+	OptionsMethods  string
+	SetupTransport  string
+	DescribeContent string
 }
 
 // Package rtsp package
@@ -74,17 +83,35 @@ type Package struct {
 // NetSession rtsp net session
 type NetSession struct {
 	protocolinterface.BasicNetSession
-	SdpMessage      *sdp.Message
-	RtpChannel      int        // for rtp in tcp session
-	RtcpChannel     int        // for rtcp　in tcp session
-	RtpPortClient   int        // rtp client port in udp session
-	RtcpPortClient  int        // rtcp client port in udp session
-	RtpPortServer   int        // rtp Server port in udp session
-	RtcpPortServer  int        // rtcp Server port in udp session
-	SessionType     ClientType // session type (pusher or puller)
-	AudioStreamName string     // audio stream name
-	VideoStreamName string     // video stream name
-	*net.UDPConn
+	SdpMessage          *sdp.Message
+	RtpChannel          int                         // for rtp in tcp session
+	RtcpChannel         int                         // for rtcp　in tcp session
+	RtpPortVideoClient  string                      // rtp client video port in udp session
+	RtcpPortVideoClient string                      // rtcp client video port in udp session
+	RtpPortAudioClient  string                      // rtp client audio port in udp session
+	RtcpPortAudioClient string                      // rtcp client audio port in udp session
+	RtpPortVideoServer  string                      // rtp Server video port in udp session
+	RtcpPortVideoServer string                      // rtcp Server video port in udp session
+	RtpPortAudioServer  string                      // rtp Server audio port in udp session
+	RtcpPortAudioServer string                      // rtcp Server audio port in udp session
+	SessionType         ClientType                  // session type (pusher or puller)
+	AudioStreamName     string                      // audio stream name
+	VideoStreamName     string                      // video stream name
+	RtspURL             *url.URL                    // resource path in url
+	ResourceMap         map[string]*ResourceSession // map url's resource to sessions
+	ResourceMapMutex    *sync.Mutex                 // provide ResourceMap's atom
+	SdpContent          string                      // sdp raw data from announce request
+	RtpUDPAudioConn     *net.UDPConn                // rtp udp connection to puller audio
+	RtcpUDPAudioConn    *net.UDPConn                // rtcp udp connection to puller audio
+	RtpUDPVideoConn     *net.UDPConn                // rtp udp connection to puller video
+	RtcpUDPVideoConn    *net.UDPConn                // rtcp udp connection to puller video
+}
+
+//ResourceSession resource session includes pusher and puller
+type ResourceSession struct {
+	Pusher      *NetSession
+	Puller      []*NetSession
+	PullerMutex sync.Mutex
 }
 
 // CloseSession close session's connection and bufio
@@ -158,6 +185,11 @@ func (session *NetSession) ReadPackage() (interface{}, error) {
 // ProcessPackage process input package
 func (session *NetSession) ProcessPackage(pack interface{}) error {
 	inputPackage := pack.(*Package)
+	var err error
+	if session.RtspURL, err = url.Parse(inputPackage.URL); err != nil {
+		inputPackage.ResponseInfo.Error = BadRequest
+		return fmt.Errorf("url.Parse error:%v", err)
+	}
 	switch inputPackage.Method {
 	case "OPTIONS":
 		inputPackage.ResponseInfo.Error = Ok
@@ -167,20 +199,28 @@ func (session *NetSession) ProcessPackage(pack interface{}) error {
 	case "ANNOUNCE":
 		var (
 			sdpSession sdp.Session
-			err        error
 		)
 		if sdpSession, err = sdp.DecodeSession(inputPackage.Content, sdpSession); err != nil {
-			return err
+			inputPackage.ResponseInfo.Error = InternalServerError
+			return fmt.Errorf("sdp.DecodeSession error:%v", err)
 		}
 		sdpDecoder := sdp.NewDecoder(sdpSession)
 		sdpMessage := new(sdp.Message)
 		if err = sdpDecoder.Decode(sdpMessage); err != nil {
-			return fmt.Errorf("err:%v", err)
+			inputPackage.ResponseInfo.Error = InternalServerError
+			return fmt.Errorf("sdpDecoder.Decode error:%v", err)
 		}
 		session.SdpMessage = sdpMessage
+		session.SdpContent = string(inputPackage.Content)
 		session.SessionType = PusherClient
-		if err := session.ProcessSdpMessage(sdpMessage, inputPackage); err == nil {
-			inputPackage.ResponseInfo.Error = Ok
+
+		if err := session.ProcessSdpMessage(sdpMessage, inputPackage); err != nil {
+			inputPackage.ResponseInfo.Error = InternalServerError
+			return fmt.Errorf("ProcessSdpMessage error:%v", err)
+		}
+		if cmd, err := session.AddSessionToResourceMap(session.SessionType); err != nil {
+			inputPackage.ResponseInfo.Error = cmd
+			return fmt.Errorf("AddSessionToResourceMap error:%v", err)
 		}
 	case "SETUP":
 		if transport, ok := inputPackage.RtspHeaderMap["Transport"]; ok {
@@ -193,56 +233,101 @@ func (session *NetSession) ProcessPackage(pack interface{}) error {
 			} else if udpChannelMatcher :=
 				regexp.MustCompile("client_port=(\\d+)(-(\\d+))?").
 					FindStringSubmatch(transport); udpChannelMatcher != nil {
-				session.RtpPortClient, _ = strconv.Atoi(udpChannelMatcher[1])
-				session.RtcpPortClient, _ = strconv.Atoi(udpChannelMatcher[3])
+				rtpPortClient := udpChannelMatcher[1]
+				rtcpPortClient := udpChannelMatcher[3]
 				var (
-					rtpPort  int
-					rtcpPort int
+					rtpPort  string
+					rtcpPort string
 					err      error
 				)
 				if session.SessionType == PusherClient {
 					if strings.Contains(inputPackage.URL, session.VideoStreamName) {
+						session.RtpPortVideoClient = rtpPortClient
+						session.RtcpPortVideoClient = rtcpPortClient
 						rtpPort, err = session.StartUDPServer(RtpVideo)
 						if err != nil {
 							inputPackage.ResponseInfo.Error = InternalServerError
 							return err
 						}
-						session.RtpPortServer = rtpPort
+						session.RtpPortVideoServer = rtpPort
 						rtcpPort, err = session.StartUDPServer(RtcpVideo)
 						if err != nil {
 							inputPackage.ResponseInfo.Error = InternalServerError
 							return err
 						}
-						session.RtcpPortServer = rtcpPort
-						fmt.Printf("rtp port for video = %v,and rtcp port = %v\n",
+						session.RtcpPortVideoServer = rtcpPort
+						fmt.Printf("rtp server port for video = %v,and rtcp port = %v\n",
 							rtpPort, rtcpPort)
 					}
 					if strings.Contains(inputPackage.URL, session.AudioStreamName) {
-
+						session.RtpPortAudioClient = rtpPortClient
+						session.RtcpPortAudioClient = rtcpPortClient
 						rtpPort, err = session.StartUDPServer(RtpAudio)
 						if err != nil {
 							inputPackage.ResponseInfo.Error = InternalServerError
 							return err
 						}
-						session.RtpPortServer = rtpPort
+						session.RtpPortAudioServer = rtpPort
 						rtcpPort, err = session.StartUDPServer(RtcpAudio)
 						if err != nil {
 							inputPackage.ResponseInfo.Error = InternalServerError
 							return err
 						}
-						session.RtcpPortServer = rtcpPort
-						fmt.Printf("rtp port for audio = %v,and rtcp port = %v\n",
+						session.RtcpPortAudioServer = rtcpPort
+						fmt.Printf("rtp server port for audio = %v,and rtcp port = %v\n",
 							rtpPort, rtcpPort)
 					}
 					inputPackage.ResponseInfo.SetupTransport =
 						fmt.Sprintf("Transport: %v;server_port=%v-%v",
 							transport, rtpPort, rtcpPort)
 					inputPackage.ResponseInfo.Error = Ok
+				} else if session.SessionType == PullerClient {
+					if strings.Contains(inputPackage.URL, session.VideoStreamName) {
+						session.RtpPortVideoClient = rtpPortClient
+						session.RtcpPortVideoClient = rtcpPortClient
+						if err = session.StartUDPClient(RtpVideo); err != nil {
+							inputPackage.ResponseInfo.Error = InternalServerError
+							return err
+						}
+						if err = session.StartUDPClient(RtcpVideo); err != nil {
+							inputPackage.ResponseInfo.Error = InternalServerError
+							return err
+						}
+						fmt.Printf("connected to puller\n\trtp port for video = %v,and rtcp port = %v\n",
+							rtpPortClient, rtcpPortClient)
+					}
+					if strings.Contains(inputPackage.URL, session.AudioStreamName) {
+						session.RtpPortAudioClient = rtpPortClient
+						session.RtcpPortAudioClient = rtcpPortClient
+						if err = session.StartUDPClient(RtpVideo); err != nil {
+							inputPackage.ResponseInfo.Error = InternalServerError
+							return err
+						}
+						if err = session.StartUDPClient(RtcpVideo); err != nil {
+							inputPackage.ResponseInfo.Error = InternalServerError
+							return err
+						}
+						fmt.Printf("connected to puller\n\trtp port for audio = %v,and rtcp port = %v\n",
+							rtpPortClient, rtcpPortClient)
+					}
+					inputPackage.ResponseInfo.SetupTransport =
+						fmt.Sprintf("Transport: %v", transport)
+					inputPackage.ResponseInfo.Error = Ok
 				}
 			} else {
 				inputPackage.ResponseInfo.Error = UnsupportedTransport
 			}
 		}
+	case "DESCRIBE":
+		session.SessionType = PullerClient
+		if cmd, err := session.AddSessionToResourceMap(session.SessionType); err != nil {
+			inputPackage.ResponseInfo.Error = cmd
+			return fmt.Errorf("AddSessionToResourceMap error:%v", err)
+		}
+		pusherSession := session.ResourceMap[session.RtspURL.Path].Pusher
+		inputPackage.ResponseInfo.DescribeContent =
+			fmt.Sprintf("Content-Type: application/sdp\r\nContent-Length: %v\r\n%v",
+				len(pusherSession.SdpContent), pusherSession.SdpContent)
 	default:
 		inputPackage.Error = NotSupport
 	}
@@ -266,9 +351,12 @@ func (session *NetSession) WritePackage(pack interface{}) error {
 				responseBuf += outputPackage.ResponseInfo.OptionsMethods
 			case "SETUP":
 				responseBuf += outputPackage.ResponseInfo.SetupTransport
+			case "DESCRIBE":
+				responseBuf += outputPackage.ResponseInfo.DescribeContent
 			}
 		}
 		responseBuf += string("\r\n")
+		fmt.Println(responseBuf)
 		if sendNum, err :=
 			session.Bufio.WriteString(responseBuf); err != nil {
 			return fmt.Errorf(`WritePackage's WriteString error,
@@ -287,32 +375,71 @@ func (session *NetSession) WritePackage(pack interface{}) error {
 }
 
 //StartUDPServer start udp server for rtp rtcp
-func (session *NetSession) StartUDPServer(packageType PackageType) (int, error) {
+func (session *NetSession) StartUDPServer(packageType PackageType) (string, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", ":0")
 	if err != nil {
-		return 0, err
+		return "", err
 	}
 	udpConnection, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
 	if err := udpConnection.SetReadBuffer(session.ReadBufferSize); err != nil {
-		return 0, err
+		return "", err
 	}
 	if err := udpConnection.SetWriteBuffer(session.WriteBufferSize); err != nil {
-		return 0, err
+		return "", err
 	}
 	if port := regexp.MustCompile(":(\\d+)").
 		FindStringSubmatch(udpConnection.LocalAddr().String()); port != nil {
-		if portNum, err := strconv.Atoi(port[1]); err != nil {
-			return 0, err
-		} else {
-			return portNum, nil
-		}
+		return port[1], nil
 	} else {
-		return 0, fmt.Errorf("not find udp port number in %v",
+		return "", fmt.Errorf("not find udp port number in %v",
 			udpConnection.LocalAddr().String())
 	}
+}
+
+//StartUDPClient start udp connection to puller
+func (session *NetSession) StartUDPClient(packageType PackageType) error {
+	host := session.Conn.RemoteAddr().String()
+	ip := host[:strings.LastIndex(host, ":")]
+	var port string
+	switch packageType {
+	case RtpAudio:
+		port = session.RtpPortAudioClient
+	case RtpVideo:
+		port = session.RtpPortVideoClient
+	case RtcpAudio:
+		port = session.RtcpPortAudioClient
+	case RtcpVideo:
+		port = session.RtcpPortVideoClient
+	}
+	host = ip + ":" + port
+	udpAddr, err := net.ResolveUDPAddr("udp", host)
+	if err != nil {
+		return err
+	}
+	udpConnection, err := net.DialUDP("udp", nil, udpAddr)
+	if err != nil {
+		return err
+	}
+	if err := udpConnection.SetReadBuffer(session.ReadBufferSize); err != nil {
+		return err
+	}
+	if err := udpConnection.SetWriteBuffer(session.WriteBufferSize); err != nil {
+		return err
+	}
+	switch packageType {
+	case RtpAudio:
+		session.RtpUDPAudioConn = udpConnection
+	case RtcpAudio:
+		session.RtcpUDPAudioConn = udpConnection
+	case RtpVideo:
+		session.RtpUDPVideoConn = udpConnection
+	case RtcpVideo:
+		session.RtcpUDPVideoConn = udpConnection
+	}
+	return nil
 }
 
 //ProcessSdpMessage print sdp message content
@@ -354,4 +481,32 @@ func (session *NetSession) ProcessSdpMessage(sdpMessage *sdp.Message, rtspPackag
 		}
 	}
 	return nil
+}
+
+//AddSessionToResourceMap Add Session To ResourceMap based on sessionType
+func (session *NetSession) AddSessionToResourceMap(
+	sessionType ClientType) (CommandError, error) {
+	session.ResourceMapMutex.Lock()
+	defer session.ResourceMapMutex.Unlock()
+	switch sessionType {
+	case PusherClient:
+		if _, ok := session.ResourceMap[session.RtspURL.Path]; ok {
+			return Forbidden, fmt.Errorf("pusher's request's url already used")
+		}
+		session.ResourceMap[session.RtspURL.Path] = &ResourceSession{
+			Pusher: session,
+			Puller: make([]*NetSession, 5),
+		}
+	case PullerClient:
+		if _, ok := session.ResourceMap[session.RtspURL.Path]; !ok {
+			return Forbidden, fmt.Errorf("puller's request's url not found")
+		}
+		session.ResourceMap[session.RtspURL.Path].Puller =
+			append(session.ResourceMap[session.RtspURL.Path].Puller, session)
+		session.AudioStreamName =
+			session.ResourceMap[session.RtspURL.Path].Pusher.AudioStreamName
+		session.VideoStreamName =
+			session.ResourceMap[session.RtspURL.Path].Pusher.VideoStreamName
+	}
+	return Ok, nil
 }
