@@ -4,17 +4,25 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 
 	"github.com/darunshen/go/streamProtocol/protocolinterface"
 	"github.com/teris-io/shortid"
 )
 
+var (
+	//ReadBufferSize bio&tcp&udp read buffer size
+	ReadBufferSize int
+	//WriteBufferSize bio&tcp&udp write buffer size
+	WriteBufferSize int
+)
+
 // Server rtsp server
 type Server struct {
 	protocolinterface.BasicNet
-	ResourceMap      map[string]*ResourceSession
-	ResourceMapMutex sync.Mutex
+	PusherPullersSessionMap      map[string]*PusherPullersSession
+	PusherPullersSessionMapMutex sync.Mutex
 }
 
 // StartSession start a session with rtsp client
@@ -26,15 +34,16 @@ func (server *Server) StartSession(conn *net.TCPConn) error {
 
 	newSession := new(NetSession)
 	newSession.Conn = conn
-	newSession.ResourceMap = server.ResourceMap
-	newSession.ResourceMapMutex = &server.ResourceMapMutex
+	host := newSession.Conn.RemoteAddr().String()
+	rip := host[:strings.LastIndex(host, ":")]
+	newSession.RemoteIP = &rip
+	newSession.PusherPullersSessionMap = server.PusherPullersSessionMap
+	newSession.PusherPullersSessionMapMutex = &server.PusherPullersSessionMapMutex
 	newSession.Bufio =
 		bufio.NewReadWriter(
-			bufio.NewReaderSize(conn, server.ReadBufferSize),
-			bufio.NewWriterSize(conn, server.WriteBufferSize))
+			bufio.NewReaderSize(conn, ReadBufferSize),
+			bufio.NewWriterSize(conn, WriteBufferSize))
 	newSession.ID = shortid.MustGenerate()
-	newSession.ReadBufferSize = server.ReadBufferSize
-	newSession.WriteBufferSize = server.WriteBufferSize
 	for {
 		if pkg, err := newSession.ReadPackage(); err == nil {
 			if err = newSession.ProcessPackage(pkg); err != nil {
@@ -63,21 +72,21 @@ bufferWriteSize: bio&tcp write buffer size
 func (server *Server) Start(address string,
 	bufferReadSize int,
 	bufferWriteSize int) error {
-	server.ReadBufferSize = bufferReadSize
-	server.WriteBufferSize = bufferWriteSize
-	server.ResourceMap = make(map[string]*ResourceSession)
+	ReadBufferSize = bufferReadSize
+	WriteBufferSize = bufferWriteSize
+	server.PusherPullersSessionMap = make(map[string]*PusherPullersSession)
 	addr, err := net.ResolveTCPAddr("tcp", address)
 	if err != nil {
 		return fmt.Errorf("address resolving failed : %v", err)
 	}
 	server.Host, _, _ = net.SplitHostPort(address)
 	server.Port = addr.Port
-	if listener, err := net.ListenTCP("tcp", addr); err != nil {
+	listener, err := net.ListenTCP("tcp", addr)
+	if err != nil {
 		return fmt.Errorf("listen tcp failed : %v", err)
-	} else {
-		fmt.Println("Start listening at ", address)
-		server.TCPListener = listener
 	}
+	fmt.Println("Start listening at ", address)
+	server.TCPListener = listener
 
 	server.IfStop = false
 	for !server.IfStop {
@@ -86,10 +95,10 @@ func (server *Server) Start(address string,
 			fmt.Println("AcceptTCP failed : ", err)
 			continue
 		}
-		if err := conn.SetReadBuffer(server.ReadBufferSize); err != nil {
+		if err := conn.SetReadBuffer(ReadBufferSize); err != nil {
 			return fmt.Errorf("SetReadBuffer error, %v", err)
 		}
-		if err := conn.SetWriteBuffer(server.WriteBufferSize); err != nil {
+		if err := conn.SetWriteBuffer(WriteBufferSize); err != nil {
 			return fmt.Errorf("SetWriteBuffer error, %v", err)
 		}
 		go server.StartSession(conn)
