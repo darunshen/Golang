@@ -68,13 +68,19 @@ type NetSession struct {
 	PusherPullersSessionMap      map[string]*PusherPullersSession // map url's resource to sessions
 	PusherPullersSessionMapMutex *sync.Mutex                      // provide ResourceMap's atom
 	SdpContent                   string                           // sdp raw data from announce request
+	SourcePath                   string                           // Source Path of request url
 }
 
 // CloseSession close session's connection and bufio
 func (session *NetSession) CloseSession() error {
-	session.Bufio.Flush()
+	// session.Bufio.Flush()
 	session.Conn.Close()
 	session.Conn = nil
+	if _, ok := session.PusherPullersSessionMap[session.SourcePath]; ok {
+		session.PusherPullersSessionMapMutex.Lock()
+		delete(session.PusherPullersSessionMap, session.SourcePath)
+		session.PusherPullersSessionMapMutex.Unlock()
+	}
 	return nil
 }
 
@@ -166,6 +172,7 @@ func (session *NetSession) ProcessPackage(pack interface{}) error {
 		session.PusherPullersSessionMapMutex.Lock()
 		session.PusherPullersSessionMap[session.RtspURL.Path] = pps
 		session.PusherPullersSessionMapMutex.Unlock()
+		session.SourcePath = session.RtspURL.Path
 		if sdpSession, err = sdp.DecodeSession(inputPackage.Content, sdpSession); err != nil {
 			inputPackage.ResponseInfo.Error = InternalServerError
 			return fmt.Errorf("sdp.DecodeSession error:%v", err)
@@ -200,8 +207,10 @@ func (session *NetSession) ProcessPackage(pack interface{}) error {
 			} else if udpChannelMatcher :=
 				regexp.MustCompile("client_port=(\\d+)(-(\\d+))?").
 					FindStringSubmatch(transport); udpChannelMatcher != nil {
-				rtpPort := udpChannelMatcher[1]
-				rtcpPort := udpChannelMatcher[3]
+				var rtpPort = new(string)
+				var rtcpPort = new(string)
+				*rtpPort = udpChannelMatcher[1]
+				*rtcpPort = udpChannelMatcher[3]
 				var (
 					mediaType    MediaType
 					mediaName    string
@@ -230,22 +239,23 @@ func (session *NetSession) ProcessPackage(pack interface{}) error {
 				if err := pps.AddRtpRtcpSession(
 					session.SessionType,
 					mediaType,
-					&rtpPort,
-					&rtcpPort,
+					rtpPort,
+					rtcpPort,
 					session.RemoteIP,
 				); err != nil {
 					inputPackage.ResponseInfo.Error = InternalServerError
+					return fmt.Errorf("AddRtpRtcpSession faied:%v", err)
 				}
 				if session.SessionType == PusherClient {
 					fmt.Printf("rtp server port for %v = %v,and rtcp port = %v\n",
-						mediaName, rtpPort, rtcpPort)
+						mediaName, *rtpPort, *rtcpPort)
 					inputPackage.ResponseInfo.SetupTransport =
-						fmt.Sprintf("Transport: %v;server_port=%v-%v",
-							transport, rtpPort, rtcpPort)
+						fmt.Sprintf("Transport: %v;server_port=%v-%v\n",
+							transport, *rtpPort, *rtcpPort)
 					inputPackage.ResponseInfo.Error = Ok
 				} else if session.SessionType == PullerClient {
 					fmt.Printf("connected to puller\n\trtp port for %v = %v,and rtcp port = %v\n",
-						mediaName, rtpPort, rtcpPort)
+						mediaName, *rtpPort, *rtcpPort)
 					inputPackage.ResponseInfo.SetupTransport =
 						fmt.Sprintf("Transport: %v", transport)
 					inputPackage.ResponseInfo.Error = Ok

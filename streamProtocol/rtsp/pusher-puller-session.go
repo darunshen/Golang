@@ -9,9 +9,12 @@ import (
 
 //PusherPullersPair one pusher maps multiple pullers
 type PusherPullersPair struct {
-	Pusher       *RtpRtcpSession
-	Pullers      []*RtpRtcpSession
-	PullersMutex sync.Mutex
+	Pusher          *RtpRtcpSession
+	Pullers         []*RtpRtcpSession
+	PullersMutex    sync.Mutex
+	rtpPackageChan  chan RtpRtcpPackage
+	rtcpPackageChan chan RtpRtcpPackage
+	IfStop          bool
 }
 
 //PusherPullersSession session includes pusher and pullers
@@ -27,21 +30,33 @@ type PusherPullersSession struct {
 func (session *PusherPullersSession) AddRtpRtcpSession(
 	clientType ClientType, mediaType MediaType,
 	rtpPort, rtcpPort, remoteIP *string) error {
-	session.PusherPullersPairMap = make(map[MediaType]*PusherPullersPair)
+	if session.PusherPullersPairMap == nil {
+		session.PusherPullersPairMap = make(map[MediaType]*PusherPullersPair)
+	}
 	switch clientType {
 	case PusherClient:
 		if _, ok := session.PusherPullersPairMap[mediaType]; ok {
 			return fmt.Errorf("pusher's request's url resource already used")
 		}
 		ppp := new(PusherPullersPair)
+		ppp.rtpPackageChan = make(chan RtpRtcpPackage)
+		ppp.rtcpPackageChan = make(chan RtpRtcpPackage)
 		session.PusherPullersPairMap[mediaType] = ppp
 		rrs := new(RtpRtcpSession)
 		if err := rrs.StartRtpRtcpSession(clientType, mediaType, nil); err != nil {
 			return err
 		}
+		if err := rrs.BeginTransfer(clientType,
+			ppp.rtpPackageChan,
+			ppp.rtcpPackageChan); err != nil {
+			return err
+		}
+		if err := ppp.Start(); err != nil {
+			return err
+		}
 		ppp.Pusher = rrs
-		rtpPort = rrs.RtpServerPort
-		rtcpPort = rrs.RtcpServerPort
+		*rtpPort = *rrs.RtpServerPort
+		*rtcpPort = *rrs.RtcpServerPort
 	case PullerClient:
 		ppp, ok := session.PusherPullersPairMap[mediaType]
 		if !ok {
@@ -55,11 +70,35 @@ func (session *PusherPullersSession) AddRtpRtcpSession(
 		}); err != nil {
 			return err
 		}
+		if err := rrs.BeginTransfer(clientType, nil, nil); err != nil {
+			return err
+		}
 		ppp.PullersMutex.Lock()
 		ppp.Pullers = append(ppp.Pullers, rrs)
 		ppp.PullersMutex.Unlock()
 	default:
 		return fmt.Errorf("clientType error : not support")
 	}
+	return nil
+}
+
+//Start start package(rtp/rtcp) transfer from pusher to pullers
+func (session *PusherPullersPair) Start() error {
+	go func() {
+		for !session.IfStop {
+			data := <-session.rtpPackageChan
+			for _, puller := range session.Pullers {
+				puller.RtpPackageChannel <- &data
+			}
+		}
+	}()
+	go func() {
+		for !session.IfStop {
+			data := <-session.rtcpPackageChan
+			for _, puller := range session.Pullers {
+				puller.RtcpPackageChannel <- &data
+			}
+		}
+	}()
 	return nil
 }

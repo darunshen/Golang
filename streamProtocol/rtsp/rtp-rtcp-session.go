@@ -28,15 +28,36 @@ const (
 
 //RtpRtcpSession a pair of rtp-rtcp sessions
 type RtpRtcpSession struct {
-	RtpUDPConnToPuller  *net.UDPConn // rtp udp connection to puller
-	RtcpUDPConnToPuller *net.UDPConn // rtcp udp connection to puller
-	RtpUDPConnToPusher  *net.UDPConn // rtp udp connection to pusher
-	RtcpUDPConnToPusher *net.UDPConn // rtcp udp connection to pusher
-	RtpServerPort       *string      // rtp Server port in udp session
-	RtcpServerPort      *string      // rtcp Server port in udp session
-	SessionMediaType    MediaType    // this session's media type
-	SessionClientType   ClientType   // this session's client type(connected to pusher or puller)
+	RtpUDPConnToPuller  *net.UDPConn         // rtp udp connection to puller
+	RtcpUDPConnToPuller *net.UDPConn         // rtcp udp connection to puller
+	RtpUDPConnToPusher  *net.UDPConn         // rtp udp connection to pusher
+	RtcpUDPConnToPusher *net.UDPConn         // rtcp udp connection to pusher
+	RtpServerPort       *string              // rtp Server port in udp session
+	RtcpServerPort      *string              // rtcp Server port in udp session
+	SessionMediaType    MediaType            // this session's media type
+	SessionClientType   ClientType           // this session's client type(connected to pusher or puller)
+	RtpPackageChannel   chan *RtpRtcpPackage // rtp packages for puller
+	RtcpPackageChannel  chan *RtpRtcpPackage // rtcp packages for puller
+	IfStop              bool                 // if stop is true,then stop go routines created by this session
 }
+
+//PackageType package type
+type PackageType int
+
+const (
+	//RtpPackage stand for rtp
+	RtpPackage PackageType = 0
+	//RtcpPackage stand for rtcp
+	RtcpPackage PackageType = 1
+)
+
+//RtpRtcpPackage store rtp/rtcp package content
+type RtpRtcpPackage []byte
+
+// type RtpRtcpPackage struct {
+// 	DataType PackageType
+// 	Data     *[]byte
+// }
 
 //PullerClientInfo the puller 's info as input to create rtp/rtcp
 type PullerClientInfo struct {
@@ -46,7 +67,9 @@ type PullerClientInfo struct {
 //StartRtpRtcpSession Start a pair of rtp-rtcp sessions
 func (session *RtpRtcpSession) StartRtpRtcpSession(
 	clientType ClientType, mediaType MediaType, pullerClientInfo *PullerClientInfo) error {
-	var err error
+	var (
+		err error
+	)
 	switch clientType {
 	case PusherClient:
 		session.RtpUDPConnToPusher, session.RtpServerPort, err =
@@ -59,8 +82,6 @@ func (session *RtpRtcpSession) StartRtpRtcpSession(
 		if err != nil {
 			return fmt.Errorf("startUDPServer failed : %v", err)
 		}
-		fmt.Printf("rtp server port for video = %v,and rtcp port = %v\n",
-			session.RtpUDPConnToPusher, session.RtcpUDPConnToPusher)
 	case PullerClient:
 		if pullerClientInfo == nil {
 			return fmt.Errorf("StartRtpRtcpSession :pullerClientInfo is nil")
@@ -75,6 +96,8 @@ func (session *RtpRtcpSession) StartRtpRtcpSession(
 		if err != nil {
 			return fmt.Errorf("startUDPClient failed : %v", err)
 		}
+		session.RtpPackageChannel = make(chan *RtpRtcpPackage)
+		session.RtcpPackageChannel = make(chan *RtpRtcpPackage)
 	default:
 		return fmt.Errorf("clientType error,not support")
 	}
@@ -127,4 +150,78 @@ func (session *RtpRtcpSession) startUDPClient(ip, port *string) (*net.UDPConn, e
 		return nil, err
 	}
 	return udpConnection, nil
+}
+
+//BeginTransfer begin recieving packages from pusher,then push into channel
+func (session *RtpRtcpSession) BeginTransfer(clientType ClientType,
+	rtpChan, rtcpChan chan RtpRtcpPackage) error {
+	if clientType == PusherClient && (rtpChan == nil || rtcpChan == nil) {
+		return fmt.Errorf(
+			"BeginTransfer failed,PusherClient input channel arg have nil")
+	}
+	if clientType == PullerClient && !(rtpChan == nil && rtcpChan == nil) {
+		return fmt.Errorf(
+			"BeginTransfer failed,PullerClient input channel arg not all nil")
+	}
+	if clientType == PusherClient {
+		go func() {
+			for !session.IfStop {
+				data := make([]byte, ReadBufferSize)
+				if _, _, err := session.RtpUDPConnToPusher.ReadFromUDP(data); err == nil {
+					rtpChan <- data
+				} else {
+					fmt.Printf(`error occured when read from pusher,
+					pusher's info from local to remote: %v -- %v
+					error = %v\n`,
+						session.RtpUDPConnToPusher.LocalAddr().String(),
+						session.RtpUDPConnToPusher.RemoteAddr().String(),
+						err)
+				}
+			}
+		}()
+		go func() {
+			for !session.IfStop {
+				data := make([]byte, ReadBufferSize)
+				if _, _, err := session.RtcpUDPConnToPusher.ReadFromUDP(data); err == nil {
+					rtcpChan <- data
+				} else {
+					fmt.Printf(`error occured when read from pusher,
+					pusher's info from local to remote: %v -- %v
+					error = %v\n`,
+						session.RtcpUDPConnToPusher.LocalAddr().String(),
+						session.RtcpUDPConnToPusher.RemoteAddr().String(),
+						err)
+				}
+			}
+		}()
+	}
+	if clientType == PullerClient {
+		go func() {
+			for !session.IfStop {
+				data := <-session.RtpPackageChannel
+				if _, err := session.RtpUDPConnToPuller.Write(*data); err != nil {
+					fmt.Printf(`error occured when write to puller,
+					puller's info from local to remote: %v -- %v
+					error = %v\n`,
+						session.RtpUDPConnToPuller.LocalAddr().String(),
+						session.RtpUDPConnToPuller.RemoteAddr().String(),
+						err)
+				}
+			}
+		}()
+		go func() {
+			for !session.IfStop {
+				data := <-session.RtcpPackageChannel
+				if _, err := session.RtcpUDPConnToPuller.Write(*data); err != nil {
+					fmt.Printf(`error occured when write to puller,
+					puller's info from local to remote: %v -- %v
+					error = %v\n`,
+						session.RtcpUDPConnToPuller.LocalAddr().String(),
+						session.RtcpUDPConnToPuller.RemoteAddr().String(),
+						err)
+				}
+			}
+		}()
+	}
+	return nil
 }
