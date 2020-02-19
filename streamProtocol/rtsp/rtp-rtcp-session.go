@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"time"
 )
 
 //MediaType the media type of this session
@@ -96,8 +97,8 @@ func (session *RtpRtcpSession) StartRtpRtcpSession(
 		if err != nil {
 			return fmt.Errorf("startUDPClient failed : %v", err)
 		}
-		session.RtpPackageChannel = make(chan *RtpRtcpPackage)
-		session.RtcpPackageChannel = make(chan *RtpRtcpPackage)
+		session.RtpPackageChannel = make(chan *RtpRtcpPackage, PullChannelBufferSize)
+		session.RtcpPackageChannel = make(chan *RtpRtcpPackage, PullChannelBufferSize)
 	default:
 		return fmt.Errorf("clientType error,not support")
 	}
@@ -163,65 +164,79 @@ func (session *RtpRtcpSession) BeginTransfer(clientType ClientType,
 		return fmt.Errorf(
 			"BeginTransfer failed,PullerClient input channel arg not all nil")
 	}
+	var mediaName string
+	if session.SessionMediaType == MediaVideo {
+		mediaName = "video"
+	} else if session.SessionMediaType == MediaAudio {
+		mediaName = "audio"
+	}
 	if clientType == PusherClient {
 		go func() {
+			var num int = 0
+			data := make([]byte, ReadBufferSize)
 			for !session.IfStop {
-				data := make([]byte, ReadBufferSize)
-				if _, _, err := session.RtpUDPConnToPusher.ReadFromUDP(data); err == nil {
-					rtpChan <- data
+				if number, _, err := session.RtpUDPConnToPusher.ReadFromUDP(data); err == nil {
+					buf := make([]byte, number)
+					copy(buf, data)
+					rtpChan <- buf
+					num++
+					fmt.Println(mediaName, "rtp pusher recieved data number =", num)
 				} else {
-					fmt.Printf(`error occured when read from pusher,
-					pusher's info from local to remote: %v -- %v
-					error = %v\n`,
-						session.RtpUDPConnToPusher.LocalAddr().String(),
-						session.RtpUDPConnToPusher.RemoteAddr().String(),
-						err)
+					fmt.Printf("error occured when read from pusher = %v\n", err)
+					return
 				}
 			}
 		}()
 		go func() {
+			var num int = 0
+			data := make([]byte, ReadBufferSize)
 			for !session.IfStop {
-				data := make([]byte, ReadBufferSize)
-				if _, _, err := session.RtcpUDPConnToPusher.ReadFromUDP(data); err == nil {
-					rtcpChan <- data
+				if number, _, err := session.RtcpUDPConnToPusher.ReadFromUDP(data); err == nil {
+					buf := make([]byte, number)
+					copy(buf, data)
+					rtcpChan <- buf
+					num++
+					fmt.Println(mediaName, "rtcp pusher recieved data number =", num)
 				} else {
-					fmt.Printf(`error occured when read from pusher,
-					pusher's info from local to remote: %v -- %v
-					error = %v\n`,
-						session.RtcpUDPConnToPusher.LocalAddr().String(),
-						session.RtcpUDPConnToPusher.RemoteAddr().String(),
-						err)
+					fmt.Printf("error occured when read from pusher = %v\n", err)
+					return
 				}
 			}
 		}()
 	}
 	if clientType == PullerClient {
 		go func() {
+			var num int = 0
 			for !session.IfStop {
 				data := <-session.RtpPackageChannel
 				if _, err := session.RtpUDPConnToPuller.Write(*data); err != nil {
-					fmt.Printf(`error occured when write to puller,
-					puller's info from local to remote: %v -- %v
-					error = %v\n`,
-						session.RtpUDPConnToPuller.LocalAddr().String(),
-						session.RtpUDPConnToPuller.RemoteAddr().String(),
-						err)
+					fmt.Printf("error occured when write to puller = %v\n", err)
+					return
 				}
+				time.Sleep(time.Duration(10) * time.Millisecond)
+				num++
+				fmt.Println(mediaName, "rtp puller sended data number =", num)
 			}
 		}()
 		go func() {
+			var num int = 0
 			for !session.IfStop {
 				data := <-session.RtcpPackageChannel
 				if _, err := session.RtcpUDPConnToPuller.Write(*data); err != nil {
-					fmt.Printf(`error occured when write to puller,
-					puller's info from local to remote: %v -- %v
-					error = %v\n`,
-						session.RtcpUDPConnToPuller.LocalAddr().String(),
-						session.RtcpUDPConnToPuller.RemoteAddr().String(),
-						err)
+					fmt.Printf("error occured when write to puller error = %v\n", err)
+					return
 				}
+				time.Sleep(time.Duration(10) * time.Millisecond)
+				num++
+				fmt.Println(mediaName, "rctp puller sended data number =", num)
 			}
 		}()
 	}
+	return nil
+}
+
+//StopTransfer stop this transfer
+func (session *RtpRtcpSession) StopTransfer() error {
+	session.IfStop = true
 	return nil
 }

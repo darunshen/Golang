@@ -16,6 +16,10 @@ var (
 	ReadBufferSize int
 	//WriteBufferSize bio&tcp&udp write buffer size
 	WriteBufferSize int
+	//PushChannelBufferSize pusher channel buffer size
+	PushChannelBufferSize int
+	//PullChannelBufferSize puller channel buffer size
+	PullChannelBufferSize int
 )
 
 // Server rtsp server
@@ -71,9 +75,13 @@ bufferWriteSize: bio&tcp write buffer size
 */
 func (server *Server) Start(address string,
 	bufferReadSize int,
-	bufferWriteSize int) error {
+	bufferWriteSize int,
+	pushChannelBufferSize int,
+	pullChannelBufferSize int) error {
 	ReadBufferSize = bufferReadSize
 	WriteBufferSize = bufferWriteSize
+	PushChannelBufferSize = pushChannelBufferSize
+	PullChannelBufferSize = pullChannelBufferSize
 	server.PusherPullersSessionMap = make(map[string]*PusherPullersSession)
 	addr, err := net.ResolveTCPAddr("tcp", address)
 	if err != nil {

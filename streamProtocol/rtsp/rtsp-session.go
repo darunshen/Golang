@@ -1,6 +1,8 @@
 package rtsp
 
-//@todo add session 'Client State Machine'
+/*
+@todo add balanced binary tree for pusher and puller
+*/
 import (
 	"bytes"
 	"fmt"
@@ -35,7 +37,59 @@ const (
 	Forbidden CommandError = "403 Forbidden"
 	//NotFound not found the resource path for puller client
 	NotFound CommandError = "404 Not Found"
+	//MethodNotValid method not valid in tis state , see rtsp state machine
+	MethodNotValid CommandError = "455 Method Not Valid in This State"
 )
+
+// server state machine
+const (
+	//ServerInit The initial state, no valid SETUP has been received yet.
+	ServerInit string = "Init"
+	//ServerReady last SETUP received was successful,reply sent or after playing,
+	//last PAUSE received was successful,reply sent.
+	ServerReady string = "Ready"
+	//ServerPlaying last PLAY received was successful, reply sent. Data is being sent.
+	ServerPlaying string = "Playing"
+	//ServerRecording the server is recording media data.
+	ServerRecording string = "Recording"
+)
+
+// method name
+const (
+	//SETUP rtsp method SETUP
+	SETUP string = "SETUP"
+	//TEARDOWN rtsp method TEARDOWN
+	TEARDOWN string = "TEARDOWN"
+	//PLAY rtsp method PLAY
+	PLAY string = "PLAY"
+	//RECORD rtsp method RECORD
+	RECORD string = "RECORD"
+	//PAUSE rtsp method PAUSE
+	PAUSE string = "PAUSE"
+	//DESCRIBE rtsp method DESCRIBE
+	DESCRIBE string = "DESCRIBE"
+	//ANNOUNCE rtsp method ANNOUNCE
+	ANNOUNCE string = "ANNOUNCE"
+	//OPTIONS rtsp method OPTIONS
+	OPTIONS string = "OPTIONS"
+)
+
+var machinaStateMap = map[string]string{
+	ServerInit + SETUP:         ServerReady,
+	ServerInit + TEARDOWN:      ServerInit,
+	ServerReady + PLAY:         ServerPlaying,
+	ServerReady + RECORD:       ServerRecording,
+	ServerReady + TEARDOWN:     ServerInit,
+	ServerReady + SETUP:        ServerReady,
+	ServerPlaying + PAUSE:      ServerReady,
+	ServerPlaying + TEARDOWN:   ServerInit,
+	ServerPlaying + PLAY:       ServerPlaying,
+	ServerPlaying + SETUP:      ServerPlaying, //(changed transport)
+	ServerRecording + PAUSE:    ServerReady,
+	ServerRecording + TEARDOWN: ServerInit,
+	ServerRecording + RECORD:   ServerRecording,
+	ServerRecording + SETUP:    ServerRecording, //(changed transport)
+}
 
 // ResponseInfo response info
 type ResponseInfo struct {
@@ -69,19 +123,30 @@ type NetSession struct {
 	PusherPullersSessionMapMutex *sync.Mutex                      // provide ResourceMap's atom
 	SdpContent                   string                           // sdp raw data from announce request
 	SourcePath                   string                           // Source Path of request url
+	serverState                  string                           // server state machine
 }
 
 // CloseSession close session's connection and bufio
 func (session *NetSession) CloseSession() error {
-	// session.Bufio.Flush()
+	session.Bufio.Flush()
 	session.Conn.Close()
 	session.Conn = nil
-	if _, ok := session.PusherPullersSessionMap[session.SourcePath]; ok {
+	var returnErr error = nil
+	if pps, ok := session.PusherPullersSessionMap[session.SourcePath]; ok {
 		session.PusherPullersSessionMapMutex.Lock()
-		delete(session.PusherPullersSessionMap, session.SourcePath)
+		if session.SessionType == PusherClient {
+			// if this session is pusher ,
+			// we need free all resource include puller's resource
+			if errs := pps.StopSession(); len(errs) != 0 {
+				for index, err := range errs {
+					returnErr = fmt.Errorf("%v\nindex = %v,error = %v", returnErr, index, err)
+				}
+			}
+			delete(session.PusherPullersSessionMap, session.SourcePath)
+		}
 		session.PusherPullersSessionMapMutex.Unlock()
 	}
-	return nil
+	return returnErr
 }
 
 // ReadPackage read package for rtsp
@@ -153,13 +218,22 @@ func (session *NetSession) ProcessPackage(pack interface{}) error {
 		inputPackage.ResponseInfo.Error = BadRequest
 		return fmt.Errorf("url.Parse error:%v", err)
 	}
+	if session.serverState == "" {
+		session.serverState = ServerInit
+	}
+	if !session.CheckStateMachine(inputPackage.Method) {
+		inputPackage.ResponseInfo.Error = MethodNotValid
+		return fmt.Errorf("method not valid in tis state, see rtsp state machine")
+	}
 	switch inputPackage.Method {
-	case "OPTIONS":
+	case OPTIONS:
 		inputPackage.ResponseInfo.Error = Ok
 		inputPackage.ResponseInfo.OptionsMethods =
-			"Public: DESCRIBE, SETUP, TEARDOWN, PLAY, " +
-				"PAUSE, OPTIONS, ANNOUNCE, RECORD\r\n"
-	case "ANNOUNCE":
+			"Public: " + DESCRIBE + ", " + SETUP + ", " +
+				TEARDOWN + ", " + PLAY + ", " +
+				PAUSE + ", " + OPTIONS + ", " +
+				ANNOUNCE + ", " + RECORD + "\r\n"
+	case ANNOUNCE:
 		var (
 			sdpSession sdp.Session
 		)
@@ -191,7 +265,7 @@ func (session *NetSession) ProcessPackage(pack interface{}) error {
 			inputPackage.ResponseInfo.Error = InternalServerError
 			return fmt.Errorf("ProcessSdpMessage error:%v", err)
 		}
-	case "SETUP":
+	case SETUP:
 		/*
 			setup the udp/tcp connection for audio/video media in rtp/rtcp protocol
 
@@ -254,17 +328,17 @@ func (session *NetSession) ProcessPackage(pack interface{}) error {
 							transport, *rtpPort, *rtcpPort)
 					inputPackage.ResponseInfo.Error = Ok
 				} else if session.SessionType == PullerClient {
-					fmt.Printf("connected to puller\n\trtp port for %v = %v,and rtcp port = %v\n",
+					fmt.Printf("connected to puller\n\trtp port for %v = %v,and rtcp port = %v\r\n",
 						mediaName, *rtpPort, *rtcpPort)
 					inputPackage.ResponseInfo.SetupTransport =
-						fmt.Sprintf("Transport: %v", transport)
+						fmt.Sprintf("Transport: %v\r\n", transport)
 					inputPackage.ResponseInfo.Error = Ok
 				}
 			} else {
 				inputPackage.ResponseInfo.Error = UnsupportedTransport
 			}
 		}
-	case "DESCRIBE":
+	case DESCRIBE:
 		session.SessionType = PullerClient
 		pps, ok := session.PusherPullersSessionMap[session.RtspURL.Path]
 		if !ok {
@@ -274,9 +348,14 @@ func (session *NetSession) ProcessPackage(pack interface{}) error {
 		inputPackage.ResponseInfo.DescribeContent =
 			fmt.Sprintf("Content-Type: application/sdp\r\nContent-Length: %v\r\n\r\n%v",
 				len(*pps.SdpContent), *pps.SdpContent)
-
+	case RECORD:
+	case PLAY:
 	default:
 		inputPackage.Error = NotSupport
+	}
+	if !session.GoNextState(inputPackage.Method) {
+		inputPackage.ResponseInfo.Error = InternalServerError
+		return fmt.Errorf("method not valid in tis state when go to next state")
 	}
 	return nil
 }
@@ -363,4 +442,27 @@ func (session *NetSession) ProcessSdpMessage(
 		}
 	}
 	return nil
+}
+
+//CheckStateMachine check server state machine
+func (session *NetSession) CheckStateMachine(methodName string) bool {
+	if methodName != SETUP && methodName != TEARDOWN && methodName != PLAY &&
+		methodName != RECORD && methodName != PAUSE {
+		return true
+	}
+	_, ok := machinaStateMap[session.serverState+methodName]
+	return ok
+}
+
+//GoNextState go to next server state
+func (session *NetSession) GoNextState(methodName string) bool {
+	if methodName != SETUP && methodName != TEARDOWN && methodName != PLAY &&
+		methodName != RECORD && methodName != PAUSE {
+		return true
+	}
+	serverState, ok := machinaStateMap[session.serverState+methodName]
+	if ok {
+		session.serverState = serverState
+	}
+	return ok
 }
