@@ -40,6 +40,7 @@ type RtpRtcpSession struct {
 	RtpPackageChannel   chan *RtpRtcpPackage // rtp packages for puller
 	RtcpPackageChannel  chan *RtpRtcpPackage // rtcp packages for puller
 	IfStop              bool                 // if stop is true,then stop go routines created by this session
+	RtspSessionID       string               // identification of rtsp session
 }
 
 //PackageType package type
@@ -67,10 +68,15 @@ type PullerClientInfo struct {
 
 //StartRtpRtcpSession Start a pair of rtp-rtcp sessions
 func (session *RtpRtcpSession) StartRtpRtcpSession(
-	clientType ClientType, mediaType MediaType, pullerClientInfo *PullerClientInfo) error {
+	clientType ClientType, mediaType MediaType,
+	pullerClientInfo *PullerClientInfo, rtspSessionID string) error {
 	var (
 		err error
 	)
+	if rtspSessionID == "" {
+		return fmt.Errorf("rtsp session id is empty")
+	}
+	session.RtspSessionID = rtspSessionID
 	switch clientType {
 	case PusherClient:
 		session.RtpUDPConnToPusher, session.RtpServerPort, err =

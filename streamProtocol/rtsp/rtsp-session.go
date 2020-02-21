@@ -1,8 +1,7 @@
 package rtsp
 
-/*
-@todo add balanced binary tree for pusher and puller
-*/
+//@todo add PAUSE method
+
 import (
 	"bytes"
 	"fmt"
@@ -133,18 +132,18 @@ func (session *NetSession) CloseSession() error {
 	session.Conn = nil
 	var returnErr error = nil
 	if pps, ok := session.PusherPullersSessionMap[session.SourcePath]; ok {
-		session.PusherPullersSessionMapMutex.Lock()
+		if errs := pps.StopSession(&session.ID); len(errs) != 0 {
+			for index, err := range errs {
+				returnErr = fmt.Errorf("%v\nindex = %v,error = %v", returnErr, index, err)
+			}
+		}
 		if session.SessionType == PusherClient {
 			// if this session is pusher ,
 			// we need free all resource include puller's resource
-			if errs := pps.StopSession(); len(errs) != 0 {
-				for index, err := range errs {
-					returnErr = fmt.Errorf("%v\nindex = %v,error = %v", returnErr, index, err)
-				}
-			}
+			session.PusherPullersSessionMapMutex.Lock()
 			delete(session.PusherPullersSessionMap, session.SourcePath)
+			session.PusherPullersSessionMapMutex.Unlock()
 		}
-		session.PusherPullersSessionMapMutex.Unlock()
 	}
 	return returnErr
 }
@@ -316,6 +315,7 @@ func (session *NetSession) ProcessPackage(pack interface{}) error {
 					rtpPort,
 					rtcpPort,
 					session.RemoteIP,
+					session.ID,
 				); err != nil {
 					inputPackage.ResponseInfo.Error = InternalServerError
 					return fmt.Errorf("AddRtpRtcpSession faied:%v", err)
@@ -340,6 +340,7 @@ func (session *NetSession) ProcessPackage(pack interface{}) error {
 		}
 	case DESCRIBE:
 		session.SessionType = PullerClient
+		session.SourcePath = session.RtspURL.Path
 		pps, ok := session.PusherPullersSessionMap[session.RtspURL.Path]
 		if !ok {
 			inputPackage.ResponseInfo.Error = Forbidden
