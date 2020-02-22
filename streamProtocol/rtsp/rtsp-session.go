@@ -1,6 +1,8 @@
 package rtsp
 
-//@todo add PAUSE method
+//@todo add CMD
+//@todo add rtp protocal
+//@todo add media file transfer mode
 
 import (
 	"bytes"
@@ -74,20 +76,20 @@ const (
 )
 
 var machinaStateMap = map[string]string{
-	ServerInit + SETUP:         ServerReady,
-	ServerInit + TEARDOWN:      ServerInit,
-	ServerReady + PLAY:         ServerPlaying,
-	ServerReady + RECORD:       ServerRecording,
-	ServerReady + TEARDOWN:     ServerInit,
-	ServerReady + SETUP:        ServerReady,
-	ServerPlaying + PAUSE:      ServerReady,
-	ServerPlaying + TEARDOWN:   ServerInit,
-	ServerPlaying + PLAY:       ServerPlaying,
-	ServerPlaying + SETUP:      ServerPlaying, //(changed transport)
+	ServerInit + SETUP:       ServerReady,
+	ServerInit + TEARDOWN:    ServerInit,
+	ServerReady + PLAY:       ServerPlaying,
+	ServerReady + RECORD:     ServerRecording,
+	ServerReady + TEARDOWN:   ServerInit,
+	ServerReady + SETUP:      ServerReady,
+	ServerPlaying + PAUSE:    ServerReady,
+	ServerPlaying + TEARDOWN: ServerInit,
+	// ServerPlaying + PLAY:       ServerPlaying,
+	// ServerPlaying + SETUP:      ServerPlaying, //(changed transport)
 	ServerRecording + PAUSE:    ServerReady,
 	ServerRecording + TEARDOWN: ServerInit,
-	ServerRecording + RECORD:   ServerRecording,
-	ServerRecording + SETUP:    ServerRecording, //(changed transport)
+	// ServerRecording + RECORD:   ServerRecording,
+	// ServerRecording + SETUP:    ServerRecording, //(changed transport)
 }
 
 // ResponseInfo response info
@@ -121,7 +123,7 @@ type NetSession struct {
 	PusherPullersSessionMap      map[string]*PusherPullersSession // map url's resource to sessions
 	PusherPullersSessionMapMutex *sync.Mutex                      // provide ResourceMap's atom
 	SdpContent                   string                           // sdp raw data from announce request
-	SourcePath                   string                           // Source Path of request url
+	ReourcePath                  string                           // Resource Path of request url
 	serverState                  string                           // server state machine
 }
 
@@ -131,7 +133,7 @@ func (session *NetSession) CloseSession() error {
 	session.Conn.Close()
 	session.Conn = nil
 	var returnErr error = nil
-	if pps, ok := session.PusherPullersSessionMap[session.SourcePath]; ok {
+	if pps, ok := session.PusherPullersSessionMap[session.ReourcePath]; ok {
 		if errs := pps.StopSession(&session.ID); len(errs) != 0 {
 			for index, err := range errs {
 				returnErr = fmt.Errorf("%v\nindex = %v,error = %v", returnErr, index, err)
@@ -141,7 +143,7 @@ func (session *NetSession) CloseSession() error {
 			// if this session is pusher ,
 			// we need free all resource include puller's resource
 			session.PusherPullersSessionMapMutex.Lock()
-			delete(session.PusherPullersSessionMap, session.SourcePath)
+			delete(session.PusherPullersSessionMap, session.ReourcePath)
 			session.PusherPullersSessionMapMutex.Unlock()
 		}
 	}
@@ -245,7 +247,7 @@ func (session *NetSession) ProcessPackage(pack interface{}) error {
 		session.PusherPullersSessionMapMutex.Lock()
 		session.PusherPullersSessionMap[session.RtspURL.Path] = pps
 		session.PusherPullersSessionMapMutex.Unlock()
-		session.SourcePath = session.RtspURL.Path
+		session.ReourcePath = session.RtspURL.Path
 		if sdpSession, err = sdp.DecodeSession(inputPackage.Content, sdpSession); err != nil {
 			inputPackage.ResponseInfo.Error = InternalServerError
 			return fmt.Errorf("sdp.DecodeSession error:%v", err)
@@ -340,7 +342,7 @@ func (session *NetSession) ProcessPackage(pack interface{}) error {
 		}
 	case DESCRIBE:
 		session.SessionType = PullerClient
-		session.SourcePath = session.RtspURL.Path
+		session.ReourcePath = session.RtspURL.Path
 		pps, ok := session.PusherPullersSessionMap[session.RtspURL.Path]
 		if !ok {
 			inputPackage.ResponseInfo.Error = Forbidden
@@ -349,8 +351,40 @@ func (session *NetSession) ProcessPackage(pack interface{}) error {
 		inputPackage.ResponseInfo.DescribeContent =
 			fmt.Sprintf("Content-Type: application/sdp\r\nContent-Length: %v\r\n\r\n%v",
 				len(*pps.SdpContent), *pps.SdpContent)
+	case TEARDOWN:
+	case PAUSE:
+		if pps, ok := session.PusherPullersSessionMap[session.ReourcePath]; ok {
+			if errs := pps.PauseSession(&session.ID); len(errs) != 0 {
+				var returnErr error = nil
+				for index, err := range errs {
+					returnErr = fmt.Errorf("%v\nindex = %v,error = %v",
+						returnErr, index, err)
+				}
+				return returnErr
+			}
+		}
 	case RECORD:
+		if pps, ok := session.PusherPullersSessionMap[session.ReourcePath]; ok {
+			if errs := pps.StartSession(&session.ID); len(errs) != 0 {
+				var returnErr error = nil
+				for index, err := range errs {
+					returnErr = fmt.Errorf("%v\nindex = %v,error = %v",
+						returnErr, index, err)
+				}
+				return returnErr
+			}
+		}
 	case PLAY:
+		if pps, ok := session.PusherPullersSessionMap[session.ReourcePath]; ok {
+			if errs := pps.StartSession(&session.ID); len(errs) != 0 {
+				var returnErr error = nil
+				for index, err := range errs {
+					returnErr = fmt.Errorf("%v\nindex = %v,error = %v",
+						returnErr, index, err)
+				}
+				return returnErr
+			}
+		}
 	default:
 		inputPackage.Error = NotSupport
 	}
@@ -374,15 +408,15 @@ func (session *NetSession) WritePackage(pack interface{}) error {
 			)
 		if outputPackage.Error == Ok {
 			switch outputPackage.Method {
-			case "OPTIONS":
+			case OPTIONS:
 				responseBuf += outputPackage.ResponseInfo.OptionsMethods
-			case "SETUP":
+			case SETUP:
 				responseBuf += outputPackage.ResponseInfo.SetupTransport
-			case "DESCRIBE":
+			case DESCRIBE:
 				responseBuf += outputPackage.ResponseInfo.DescribeContent
 			}
 		}
-		if outputPackage.Method != "DESCRIBE" {
+		if outputPackage.Method != DESCRIBE {
 			responseBuf += string("\r\n")
 		}
 		if sendNum, err :=
@@ -396,6 +430,9 @@ func (session *NetSession) WritePackage(pack interface{}) error {
 			return fmt.Errorf(`WritePackage's Flush error,error = %v`, err)
 		}
 		fmt.Printf("Writed to remote:\r\n%v", responseBuf)
+		if outputPackage.Method == TEARDOWN {
+			return fmt.Errorf("TearDown,rtsp session id = %v", session.ID)
+		}
 	} else {
 		return fmt.Errorf("WritePackage error: not find CSeq field")
 	}

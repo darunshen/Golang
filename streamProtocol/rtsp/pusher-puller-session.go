@@ -48,12 +48,7 @@ func (session *PusherPullersSession) AddRtpRtcpSession(
 		if err := rrs.StartRtpRtcpSession(clientType, mediaType, nil, rtspSessionID); err != nil {
 			return err
 		}
-		if err := rrs.BeginTransfer(clientType,
-			ppp.rtpPackageChan,
-			ppp.rtcpPackageChan); err != nil {
-			return err
-		}
-		if err := ppp.Start(); err != nil {
+		if err := ppp.StartDispatch(); err != nil {
 			return err
 		}
 		ppp.Pusher = rrs
@@ -72,9 +67,6 @@ func (session *PusherPullersSession) AddRtpRtcpSession(
 		}, rtspSessionID); err != nil {
 			return err
 		}
-		if err := rrs.BeginTransfer(clientType, nil, nil); err != nil {
-			return err
-		}
 		ppp.PullersMutex.Lock()
 		ppp.Pullers.PushBack(rrs)
 		ppp.PullersMutex.Unlock()
@@ -84,8 +76,41 @@ func (session *PusherPullersSession) AddRtpRtcpSession(
 	return nil
 }
 
-//Start start package(rtp/rtcp) transfer from pusher to pullers
-func (session *PusherPullersPair) Start() error {
+//StartSession start goroutines(rtp/rtcp) created by rtspSessionID
+func (session *PusherPullersSession) StartSession(rtspSessionID *string) []error {
+	returnErr := make([]error, 0)
+	for _, ppp := range session.PusherPullersPairMap {
+		if err := ppp.Start(rtspSessionID); len(err) != 0 {
+			returnErr = append(returnErr, err...)
+		}
+	}
+	return returnErr
+}
+
+//PauseSession Pause goroutines(rtp/rtcp) created by rtspSessionID
+func (session *PusherPullersSession) PauseSession(rtspSessionID *string) []error {
+	returnErr := make([]error, 0)
+	for _, ppp := range session.PusherPullersPairMap {
+		if err := ppp.Pause(rtspSessionID); len(err) != 0 {
+			returnErr = append(returnErr, err...)
+		}
+	}
+	return returnErr
+}
+
+//StopSession stop goroutines(rtp/rtcp) created by rtspSessionID
+func (session *PusherPullersSession) StopSession(rtspSessionID *string) []error {
+	returnErr := make([]error, 0)
+	for _, ppp := range session.PusherPullersPairMap {
+		if err := ppp.Stop(rtspSessionID); len(err) != 0 {
+			returnErr = append(returnErr, err...)
+		}
+	}
+	return returnErr
+}
+
+//StartDispatch begin package(rtp/rtcp) dispatch from pusher to pullers
+func (session *PusherPullersPair) StartDispatch() error {
 	go func() {
 		for !session.IfStop {
 			data := <-session.rtpPackageChan
@@ -123,12 +148,64 @@ func (session *PusherPullersPair) Start() error {
 	return nil
 }
 
-//StopSession stop this session and goroutines created by this
-func (session *PusherPullersSession) StopSession(rtspSessionID *string) []error {
-	returnErr := make([]error, 1)
-	for _, ppp := range session.PusherPullersPairMap {
-		if err := ppp.Stop(rtspSessionID); len(err) != 0 {
-			returnErr = append(returnErr, err...)
+//Start start package(rtp/rtcp) transfer from pusher to pullers
+func (session *PusherPullersPair) Start(rtspSessionID *string) []error {
+	returnErr := make([]error, 0)
+	if session.Pusher.RtspSessionID == *rtspSessionID {
+		if err := session.Pusher.BeginTransfer(
+			session.rtpPackageChan, session.rtcpPackageChan); err != nil {
+			returnErr = append(returnErr, err)
+		}
+		for puller := session.Pullers.Front(); puller != nil; puller = puller.Next() {
+			if err := puller.Value.(*RtpRtcpSession).BeginTransfer(nil, nil); err != nil {
+				returnErr = append(returnErr, err)
+			}
+		}
+	} else {
+		var find bool = false
+		for puller := session.Pullers.Front(); puller != nil; puller = puller.Next() {
+			if puller.Value.(*RtpRtcpSession).RtspSessionID == *rtspSessionID {
+				if err := puller.Value.(*RtpRtcpSession).BeginTransfer(nil, nil); err != nil {
+					returnErr = append(returnErr, err)
+				}
+				find = true
+				break
+			}
+		}
+		if !find {
+			returnErr = append(returnErr,
+				fmt.Errorf("PusherPullersPair Start error : not find the session id"))
+		}
+	}
+	return returnErr
+}
+
+//Pause pause package(rtp/rtcp) transfer from pusher to pullers
+func (session *PusherPullersPair) Pause(rtspSessionID *string) []error {
+	returnErr := make([]error, 0)
+	if session.Pusher.RtspSessionID == *rtspSessionID {
+		if err := session.Pusher.PauseTransfer(); err != nil {
+			returnErr = append(returnErr, err)
+		}
+		for puller := session.Pullers.Front(); puller != nil; puller = puller.Next() {
+			if err := puller.Value.(*RtpRtcpSession).PauseTransfer(); err != nil {
+				returnErr = append(returnErr, err)
+			}
+		}
+	} else {
+		var find bool = false
+		for puller := session.Pullers.Front(); puller != nil; puller = puller.Next() {
+			if puller.Value.(*RtpRtcpSession).RtspSessionID == *rtspSessionID {
+				if err := puller.Value.(*RtpRtcpSession).PauseTransfer(); err != nil {
+					returnErr = append(returnErr, err)
+				}
+				find = true
+				break
+			}
+		}
+		if !find {
+			returnErr = append(returnErr,
+				fmt.Errorf("PusherPullersPair Pause error : not find the session id"))
 		}
 	}
 	return returnErr
@@ -136,7 +213,7 @@ func (session *PusherPullersSession) StopSession(rtspSessionID *string) []error 
 
 //Stop stop package(rtp/rtcp) transfer from pusher to pullers
 func (session *PusherPullersPair) Stop(rtspSessionID *string) []error {
-	returnErr := make([]error, 1)
+	returnErr := make([]error, 0)
 	if session.Pusher.RtspSessionID == *rtspSessionID {
 		if err := session.Pusher.StopTransfer(); err != nil {
 			returnErr = append(returnErr, err)
